@@ -1,84 +1,121 @@
 import argparse
 import numpy as np
 import pygame
-import sys
+import moderngl
+from pygame.locals import DOUBLEBUF, OPENGL
 
-# Neighbor offsets for CA (TsukiZombina's pattern)
-offsets = [(-1, -1), (-2, 0), (-1, 1),
-           (1, -1),  (2,  0), (1,  1)]
+# GLSL shader for Belousov-Zhabotinsky step (diffusion + reaction)
+VS = '''#version 330
+in vec2 in_pos;
+out vec2 v_uv;
+void main() {
+    v_uv = in_pos * 0.5 + 0.5;
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+}'''
 
-# Initialize state: random 0, 1, or q
-def initialize_state(h, w, q):
-    rnd = np.random.rand(h, w)
-    state = np.zeros((h, w), dtype=np.uint8)
-    state[rnd < 0.33] = 0
-    state[(rnd >= 0.33) & (rnd < 0.66)] = 1
-    state[rnd >= 0.66] = q
-    return state
+FS = '''#version 330
+uniform sampler2D tex;
+uniform float diffusion;
+uniform float pa, pb, pc;
+in vec2 v_uv;
+out vec4 f_color;
 
-# CA update step
-def update_state(src, q, g, k1, k2):
-    sum_neighbors = np.zeros_like(src, dtype=int)
-    active = np.zeros_like(src, dtype=int)
-    inactive = np.zeros_like(src, dtype=int)
-    for dy, dx in offsets:
-        nbr = np.roll(np.roll(src, dy, axis=0), dx, axis=1)
-        sum_neighbors += nbr
-        active += (nbr == q)
-        inactive += ((nbr > 0) & (nbr != q))
+// fetch with wrap-around
+vec3 get(sampler2D t, ivec2 off, ivec2 size) {
+    ivec2 coord = ivec2(v_uv * vec2(size));
+    coord = (coord + off + size) % size;
+    return texelFetch(t, coord, 0).rgb;
+}
 
-    next_state = np.empty_like(src, dtype=np.uint8)
-    # state == 0
-    mask0 = (src == 0)
-    next_state[mask0] = (active[mask0] // k1) + (inactive[mask0] // k2)
-    # 0 < state < q
-    mask1 = (src > 0) & (src < q)
-    total_nb = active + inactive + 1
-    next_state[mask1] = (sum_neighbors[mask1] // total_nb[mask1]) + g
-    # state == q
-    mask2 = (src == q)
-    next_state[mask2] = 0
-    # clamp
-    np.clip(next_state, 0, 255, out=next_state)
-    return next_state
+void main() {
+    ivec2 sz = textureSize(tex, 0);
+    vec3 c = texture(tex, v_uv).rgb;
+    vec3 sum = vec3(0.0);
+    int count = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            sum += get(tex, ivec2(dx,dy), sz);
+            count++;
+        }
+    }
+    vec3 avg = sum / float(count);
+    vec3 diff = mix(c, avg, diffusion);
+    // reaction
+    float a = diff.r;
+    float b = diff.g;
+    float d = diff.b;
+    float a2 = clamp(a + a*(pa*b - pc*d), 0.0, 1.0);
+    float b2 = clamp(b + b*(pb*d - pa*a), 0.0, 1.0);
+    float d2 = clamp(d + d*(pc*a - pb*b), 0.0, 1.0);
+    f_color = vec4(a2, b2, d2, 1.0);
+}'''
 
-# Main simulation
+# Fullscreen quad
+quad = np.array([ -1.0, -1.0,  1.0, -1.0,  -1.0, 1.0,
+                   -1.0, 1.0,   1.0, -1.0,   1.0, 1.0 ], dtype='f4')
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='BZ CA Simulator (TsukiZombina)')
+    parser = argparse.ArgumentParser()
     parser.add_argument('-W', '--width', type=int, default=512)
     parser.add_argument('-H', '--height', type=int, default=512)
-    parser.add_argument('-q', type=int, default=100, help='Max state')
-    parser.add_argument('-g', type=int, default=30, help='Growth term')
-    parser.add_argument('--k1', type=int, default=1)
-    parser.add_argument('--k2', type=int, default=2)
+    parser.add_argument('-D', '--diffusion', type=float, default=0.2)
+    parser.add_argument('-a', type=float, default=1.0)
+    parser.add_argument('-b', type=float, default=1.0)
+    parser.add_argument('-c', type=float, default=1.0)
     parser.add_argument('-f', '--fps', type=int, default=30)
     args = parser.parse_args()
 
-    W, H = args.width, args.height
-    Q, G, K1, K2 = args.q, args.g, args.k1, args.k2
-
-    buf = initialize_state(H, W, Q)
-    buf2 = np.zeros_like(buf)
-
+    # Pygame + OpenGL context
     pygame.init()
-    screen = pygame.display.set_mode((W, H))
-    pygame.display.set_caption('BZ CA Reaction')
+    pygame.display.set_mode((args.width, args.height), DOUBLEBUF|OPENGL)
+    ctx = moderngl.create_context()
+
+    prog = ctx.program(vertex_shader=VS, fragment_shader=FS)
+    vbo = ctx.buffer(quad.tobytes())
+    vao = ctx.simple_vertex_array(prog, vbo, 'in_pos')
+
+    # Ping-pong textures
+    tex1 = ctx.texture((args.width, args.height), 3, dtype='f4')
+    tex2 = ctx.texture((args.width, args.height), 3, dtype='f4')
+    fbo1 = ctx.framebuffer(color_attachments=[tex1])
+    fbo2 = ctx.framebuffer(color_attachments=[tex2])
+
+    # Initialize tex1 with random noise
+    initial = np.dstack([np.random.rand(args.height, args.width) for _ in range(3)]).astype('f4')
+    tex1.write(initial.tobytes())
+
+    current, target = tex1, tex2
+    fbo_current, fbo_target = fbo2, fbo1
+
+    prog['diffusion'].value = args.diffusion
+    prog['pa'].value = args.a
+    prog['pb'].value = args.b
+    prog['pc'].value = args.c
+
     clock = pygame.time.Clock()
     running = True
-
     while running:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 running = False
-        # Update CA
-        buf2 = update_state(buf, Q, G, K1, K2)
-        buf, buf2 = buf2, buf
-        # Render as grayscale
-        rgb = np.stack([buf]*3, axis=2)
-        surf = pygame.surfarray.make_surface(rgb.astype(np.uint8).swapaxes(0, 1))
-        screen.blit(surf, (0, 0))
+
+        # Render into target FBO
+        fbo_current.use()
+        current.use(location=0)
+        prog['tex'].value = 0
+        ctx.clear()
+        vao.render()
+
+        # Swap
+        current, target = target, current
+        fbo_current, fbo_target = fbo_target, fbo_current
+
+        # Display to screen
+        ctx.screen.use()
+        current.use(location=0)
+        vao.render()
         pygame.display.flip()
         clock.tick(args.fps)
 
     pygame.quit()
-    sys.exit()
