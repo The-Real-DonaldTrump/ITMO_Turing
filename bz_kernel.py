@@ -3,75 +3,73 @@ import numpy as np
 import pygame
 import sys
 
-# Parse command-line arguments
-def parse_args():
-    parser = argparse.ArgumentParser(description='Belousov–Zhabotinsky Reaction Simulator (Pygame)')
-    parser.add_argument('-W', '--width', type=int, default=512, help='Field width')
-    parser.add_argument('-H', '--height', type=int, default=512, help='Field height')
-    parser.add_argument('-D', '--diffusion', type=float, default=0.2, help='Diffusion rate')
-    parser.add_argument('-a', type=float, default=1.0, help='Parameter a')
-    parser.add_argument('-b', type=float, default=1.0, help='Parameter b')
-    parser.add_argument('-c', type=float, default=1.0, help='Parameter c')
-    parser.add_argument('-f', '--fps', type=int, default=30, help='Frames per second')
-    return parser.parse_args()
+def laplacian(Z):
+    return (
+        np.roll(Z, 1, axis=0) + np.roll(Z, -1, axis=0) +
+        np.roll(Z, 1, axis=1) + np.roll(Z, -1, axis=1) -
+        4 * Z
+    )
 
-# Toroidal diffusion using neighbor average
-def diffuse(src, rate):
-    n = (
-        np.roll(src, 1, 0) + np.roll(src, -1, 0) +
-        np.roll(src, 1, 1) + np.roll(src, -1, 1) +
-        np.roll(np.roll(src, 1, 0), 1, 1) + np.roll(np.roll(src, 1, 0), -1, 1) +
-        np.roll(np.roll(src, -1, 0), 1, 1) + np.roll(np.roll(src, -1, 0), -1, 1)
-    ) / 8.0
-    return src * (1 - rate) + n * rate
-
-# Reaction step with clamping
-def react(a, b, c, pa, pb, pc):
-    ca = a + a * (pa * b - pc * c)
-    cb = b + b * (pb * c - pa * a)
-    cc = c + c * (pc * a - pb * b)
-    np.clip(ca, 0, 1, out=ca)
-    np.clip(cb, 0, 1, out=cb)
-    np.clip(cc, 0, 1, out=cc)
-    return ca, cb, cc
-
-# Main
 if __name__ == '__main__':
-    args = parse_args()
-    W, H = args.width, args.height
-    DIFF_RATE = args.diffusion
-    PA, PB, PC = args.a, args.b, args.c
-    FPS = args.fps
+    parser = argparse.ArgumentParser(description="Gray-Scott Turing Patterns (CPU + Pygame)")
+    parser.add_argument('--width',  type=int,   default=512, help='grid width')
+    parser.add_argument('--height', type=int,   default=512, help='grid height')
+    parser.add_argument('--Du',     type=float, default=0.16, help='diffusion rate U')
+    parser.add_argument('--Dv',     type=float, default=0.08, help='diffusion rate V')
+    parser.add_argument('--F',      type=float, default=0.035, help='feed rate')
+    parser.add_argument('--K',      type=float, default=0.065, help='kill rate')
+    parser.add_argument('--dt',     type=float, default=1.0, help='time step')
+    parser.add_argument('--scale',  type=int,   default=1,   help='pixel scale')
+    parser.add_argument('--fps',    type=int,   default=30,  help='frames per second')
+    args = parser.parse_args()
 
-    # Initialize fields
-    a = np.random.rand(H, W).astype(np.float32) * 0.1 + 0.9
-    b = np.random.rand(H, W).astype(np.float32) * 0.1
-    c = np.random.rand(H, W).astype(np.float32) * 0.1
+    W, H = args.width, args.height
+    Du, Dv, F, K, dt = args.Du, args.Dv, args.F, args.K, args.dt
+    scale = args.scale
+
+    # Initialize fields U and V
+    U = np.ones((H, W), dtype=np.float32)
+    V = np.zeros((H, W), dtype=np.float32)
+    # Small random noise in V
+    V += (np.random.rand(H, W) * 0.2).astype(np.float32)
 
     # Pygame setup
     pygame.init()
-    screen = pygame.display.set_mode((W, H))
-    pygame.display.set_caption('BZ Reaction')
+    screen = pygame.display.set_mode((W*scale, H*scale))
     clock = pygame.time.Clock()
 
     running = True
     while running:
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
                 running = False
 
-        # Update simulation
-        a = diffuse(a, DIFF_RATE)
-        b = diffuse(b, DIFF_RATE)
-        c = diffuse(c, DIFF_RATE)
-        a, b, c = react(a, b, c, PA, PB, PC)
+        # Compute laplacians
+        Lu = laplacian(U)
+        Lv = laplacian(V)
 
-        # Draw
-        img = np.dstack((a, b, c)) * 255
-        surf = pygame.surfarray.make_surface(img.astype(np.uint8).swapaxes(0, 1))
+        # Reaction term
+        UV2 = U * V * V
+        dU = Du * Lu - UV2 + F * (1 - U)
+        dV = Dv * Lv + UV2 - (F + K) * V
+
+        U += dU * dt
+        V += dV * dt
+        # Clamp
+        np.clip(U, 0, 1, out=U)
+        np.clip(V, 0, 1, out=V)
+
+        # Display V channel
+        img = (V * 255).astype(np.uint8)
+        # Stack to grayscale rgb
+        img_rgb = np.dstack([img, img, img])
+        surf = pygame.surfarray.make_surface(img_rgb.swapaxes(0,1))
+        if scale != 1:
+            surf = pygame.transform.scale(surf, (W*scale, H*scale))
         screen.blit(surf, (0, 0))
+
         pygame.display.flip()
-        clock.tick(FPS)
+        clock.tick(args.fps)
 
     pygame.quit()
     sys.exit()
