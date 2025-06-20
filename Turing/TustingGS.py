@@ -15,7 +15,7 @@ def apply_neumann_boundary(U):
     U[-1, :]    = U[-2, :]    # нижняя граница
     U[:, 0]     = U[:, 1]     # левая граница
     U[:, -1]    = U[:, -2]    # правая граница
-if name == 'main':
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Gray-Scott Turing Patterns (CPU + Pygame)")
     parser.add_argument('--width',  type=int,   default=512, help='grid width')
     parser.add_argument('--height', type=int,   default=512, help='grid height')
